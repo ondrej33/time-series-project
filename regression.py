@@ -3,8 +3,10 @@ import seaborn as sns
 import numpy as np
 from matplotlib import pyplot as plt
 from argparse import ArgumentParser
-from statsmodels.tsa.api import VAR
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import TimeSeriesSplit, cross_validate
+from typing import Optional
+from sktime.forecasting.var import VAR
 
 
 def preprocess(data: pd.DataFrame) -> pd.DataFrame:
@@ -30,18 +32,25 @@ def preprocess(data: pd.DataFrame) -> pd.DataFrame:
     return data
 
 
+def load_data(data_path: str) -> pd.DataFrame:
+    """Load the data from a CSV file, parse the time column, and set it as the index."""
+    data = pd.read_csv(data_path, sep=";", parse_dates=["Time"], index_col="Time")
+    data.index = pd.to_datetime(data.index, format='ISO8601', utc=True)
+    return data
+
+
 class RegressionModel:
     """A wrapper for the regression model.
     
     TODO: This is just a placeholder to prototype the class.
     """
-    def __init__(self, data_file_path: str, quantity: str):
+    def __init__(self, data_path: str, quantity: str, output_path: Optional[str] = None):
         # TODO: Decide what should be saved in the class (model, data, etc.)
-        self.data = pd.read_csv(data_file_path, sep=";", parse_dates=["Time"], index_col="Time")
-        self.data.index = pd.to_datetime(self.data.index, format='ISO8601', utc=True)
+        self.data = load_data(data_path)
         self.quantity = quantity
+        self.output_path = output_path
 
-    def fit_data(self):
+    def fit_and_predict(self):
         """Fit model to the data, evaluate, and plot the results.
         
         TODO: This is just a placeholder to prototype the functionality.
@@ -49,18 +58,18 @@ class RegressionModel:
         # TODO: Add proper preprocessing, model selection, cross-validation, and evaluation
 
         # TODO: Suitable preprocessing and splitting for the model
-        # TODO: Cross-validation
+        # TODO: Cross-validation        
+
         self.data = preprocess(self.data)
         train_size = int(len(self.data) * 0.8)
         train, test = self.data.iloc[:train_size], self.data.iloc[train_size:]
 
         # TODO: Choose a suitable model for the model
-        model = VAR(train)
-        lag_order = model.select_order(maxlags=96) # max two days
-        model_fitted = model.fit(lag_order.aic)
+        model = VAR(maxlags=96, ic='aic') # max two days
+        model_fitted = model.fit(train)
 
         forecast_steps = len(test)
-        forecast = model_fitted.forecast(train.values[-lag_order.aic:], steps=forecast_steps)
+        forecast = model_fitted.predict(fh=np.arange(1, forecast_steps))
         forecast_data = pd.DataFrame(forecast, index=test.index, columns=self.data.columns)
 
         # TODO: Choose a suitable metric for the time series and selected model 
@@ -68,12 +77,15 @@ class RegressionModel:
         print(f"Mean Absolute Error:\n{mae}")
 
         # TODO: Properly plot actual vs predicted values
-        plt.figure(figsize=(12,6))
+        plt.figure(figsize=(12, 6))
         plt.plot(self.data.index, self.data[self.quantity], label=f"Actual {self.quantity}", linestyle="dashed")
         plt.plot(forecast_data.index, forecast_data[self.quantity], label=f"Forecast {self.quantity}")
         plt.legend()
-        plt.title("VAR Model Forecast")
-        plt.show()
+        plt.title("Normalized VAR Model Forecast")
+        if self.output_path is not None:
+            plt.savefig(self.output_path)
+        else:
+            plt.show()
 
 
 if __name__ == '__main__':
@@ -81,13 +93,18 @@ if __name__ == '__main__':
 
     # Parse command line arguments
     parser = ArgumentParser(
-                prog='regression.py',
-                description='Loads csv data, fits a regression model, returns a plot and a precision metric.')
-    parser.add_argument('-i', '--input', required=True)
-    parser.add_argument('-q', '--quantity', required=True)
-    # TODO: Add arguments (output file, model type, etc.)
+        prog='regression.py',
+        description='Loads csv data, fits a regression model, returns a plot and a precision metric.'
+    )
+    parser.add_argument('-i', '--input', required=True, help='Path to the input CSV file')
+    parser.add_argument('-q', '--quantity', required=True, help='Quantity to model and plot')
+    parser.add_argument('-o', '--output', help='Optional path to export the PNG plot')
     args = parser.parse_args()
 
     # Instatiate the model instance and do the processing
-    model = RegressionModel(data_file_path=args.input, quantity=args.quantity)
-    model.fit_data()
+    model = RegressionModel(
+        data_path=args.input, 
+        quantity=args.quantity, 
+        output_path=args.output
+    )
+    model.fit_and_predict()

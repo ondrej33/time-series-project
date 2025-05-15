@@ -4,9 +4,11 @@ import numpy as np
 from matplotlib import pyplot as plt
 from argparse import ArgumentParser
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import TimeSeriesSplit, cross_validate
 from typing import Optional
 from sktime.forecasting.var import VAR
+from sktime.forecasting.model_evaluation import evaluate
+from sktime.split import ExpandingWindowSplitter
+from sktime.performance_metrics.forecasting import MeanAbsoluteError
 
 
 def preprocess(data: pd.DataFrame) -> pd.DataFrame:
@@ -57,24 +59,28 @@ class RegressionModel:
         """
         # TODO: Add proper preprocessing, model selection, cross-validation, and evaluation
 
-        # TODO: Suitable preprocessing and splitting for the model
-        # TODO: Cross-validation        
-
         self.data = preprocess(self.data)
         train_size = int(len(self.data) * 0.8)
         train, test = self.data.iloc[:train_size], self.data.iloc[train_size:]
 
-        # TODO: Choose a suitable model for the model
-        model = VAR(maxlags=96, ic='aic') # max two days
+        # TODO: Check cross-validation scores on the training set
+        model = VAR(maxlags=48, ic='aic') # max one day
+        cv = ExpandingWindowSplitter(initial_window=524, step_length=48, fh=np.arange(1, 96))
+        loss = MeanAbsoluteError()
+        results = evaluate(forecaster=model, y=train, cv=cv, scoring=loss, return_model=True)
+        print(f"Cross-validation results:\n{results}")
+
+        # Fit model on the full training set
         model_fitted = model.fit(train)
 
+        # Forecast for the test set
         forecast_steps = len(test)
         forecast = model_fitted.predict(fh=np.arange(1, forecast_steps))
         forecast_data = pd.DataFrame(forecast, index=test.index, columns=self.data.columns)
 
         # TODO: Choose a suitable metric for the time series and selected model 
         mae = np.abs(forecast_data - test).mean()
-        print(f"Mean Absolute Error:\n{mae}")
+        print(f"Final MAE scores over all quantities:\n{mae}")
 
         # TODO: Properly plot actual vs predicted values
         plt.figure(figsize=(12, 6))

@@ -15,7 +15,7 @@ pip install -r requirements.txt
 
 Use `regression.py` to run the whole process. The usage is following: 
 ```
-regression.py [-h] -i INPUT -q QUANTITY [-o OUTPUT]
+regression.py [-h] -i INPUT -q QUANTITY [-o OUTPUT] -v
 ```
 
 If the output path is given, plot is exported as PNG. Otherwise, it is only opened in a console. The evaluation metric details are printed at the end. Use `python .\regression.py -h` for further details.

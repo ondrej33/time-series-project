@@ -1,20 +1,68 @@
+import os
+import warnings
+import numpy as np
 import pandas as pd
 import seaborn as sns
-import numpy as np
-from matplotlib import pyplot as plt
+
 from argparse import ArgumentParser
+from enum import Enum
+from lightgbm import LGBMRegressor
+from matplotlib import pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
-from typing import Optional
-from sktime.forecasting.var import VAR
+from sktime.forecasting.compose import RecursiveReductionForecaster
 from sktime.forecasting.model_evaluation import evaluate
+from sktime.forecasting.var import VAR
+from sktime.performance_metrics.forecasting import MeanAbsoluteError, MeanAbsolutePercentageError
 from sktime.split import ExpandingWindowSplitter
-from sktime.performance_metrics.forecasting import MeanAbsoluteError
+
+
+class ModelType(Enum):
+    VAR = "VAR"
+    LGBM = "LGBM"
 
 
 def load_data(data_path: str) -> pd.DataFrame:
     """Load the data from a CSV file, parse the time column, and set it as the index."""
     data = pd.read_csv(data_path, sep=";", parse_dates=["Time"], index_col="Time")
     data.index = pd.to_datetime(data.index, format='ISO8601', utc=True)
+    return data
+
+
+def scale(scaler: MinMaxScaler, data: pd.DataFrame) -> pd.DataFrame:
+    """Wrapper to transform data with a fitted scaler, returning proper pd.DataFrame."""
+    data_scaled_raw = scaler.transform(data)
+    data_scaled = pd.DataFrame(
+        data_scaled_raw, 
+        index=data.index, 
+        columns=data.columns
+    )
+    return data_scaled
+
+
+def inverse_scale(scaler: MinMaxScaler, data: pd.DataFrame) -> pd.DataFrame:
+    """Wrapper to inverse transform data with a fitted scaler, returning pd.DataFrame."""
+    data_inverse_scaled_raw = scaler.inverse_transform(data)
+    data_inverse_scaled = pd.DataFrame(
+        data_inverse_scaled_raw,
+        index=data.index,
+        columns=data.columns
+    )
+    return data_inverse_scaled
+
+
+def drop_constant_cols(data: pd.DataFrame, target_quantity: str) -> pd.DataFrame:
+    """Drop all constant columns from the data.
+    
+    If the target quantity is constant, raise an error and inform the user.
+    """
+    constant_cols = [col for col in data.columns if data[col].nunique() <= 1]
+    if constant_cols:
+        # If the target quantity is constant, raise an error and inform the user
+        # that the model would not ma
+        if target_quantity is not None and target_quantity in constant_cols:
+            val = data[target_quantity].unique()[0]
+            raise ValueError(f"'{target_quantity}' is constant ({val}) and doesn't need regression.")
+        data = data.drop(columns=constant_cols)
     return data
 
 
@@ -28,22 +76,13 @@ def preprocess_and_split(
     Removes constant columns, interpolates missing values, splits and scales
     the data. Returns the training and testing data, as well as a scaler for 
     inverse transformation.
-    
-    # TODO: This is just a placeholder to prototype the functionality.
     """
     # Interpolate missing values 
     data = data.interpolate()
     data = data.asfreq("30min")
 
-    # Remove constant columns that may cause issues with the model fitting and are not useful
-    constant_cols = [col for col in data.columns if data[col].nunique() <= 1]
-    if constant_cols:
-        # If the target quantity is constant, raise an error and inform the user
-        # that the model would not ma
-        if target_quantity is not None and target_quantity in constant_cols:
-            val = data[target_quantity].unique()[0]
-            raise ValueError(f"Target quantity '{target_quantity}' is constant (value is {val}) and doesn't need regression.")
-        data = data.drop(columns=constant_cols)
+    # Remove constant columns that may cause fitting issues and are not useful
+    data = drop_constant_cols(data, target_quantity)
 
     # Split the data into training and testing sets so that we can process the
     # data separately and avoid data leakage
@@ -53,128 +92,139 @@ def preprocess_and_split(
     # Simple zero-one scaling to scale the features to the same range
     scaler = MinMaxScaler()
     scaler = scaler.fit(train)
-    train_scaled = scaler.transform(train)
-    test_scaled = scaler.transform(test)
-    train_scaled = pd.DataFrame(train_scaled, index=train.index, columns=train.columns)
-    test_scaled = pd.DataFrame(test_scaled, index=test.index, columns=test.columns)
+    train_scaled = scale(scaler, train)
+    test_scaled = scale(scaler, test)
     return train_scaled, test_scaled, scaler
 
 
-class RegressionModel:
-    """A wrapper for the regression model.
-    
-    TODO: This is just a placeholder to prototype the class.
+class TimeSeriesModel:
+    """A wrapper for a time-series model. Models can be VAR or LGBM.
+
+    VAR is a vector autoregression model, very simple statistical model
+    that forecasts vector of all quantities as output based on past values.
+
+    LGBM is a gradient boosting model that is adapted for forecasting using a
+    rolling window approach. We use it to predict the target quantity value using 
+    its past values and values of other quantities as features.
+
+    Attributes:
+        quantity: Name of the target quantity to be predicted
+        model_type: Type of model to be used (VAR or LGBM)
+        verbose: If True, print additional information during processing
     """
-    def __init__(self, quantity: str):
-        # TODO: Decide what should be saved in the class (model, data, etc.)
+    def __init__(self, quantity: str, model_type: ModelType, verbose: bool = False):
         self.quantity = quantity
+        self.model_type = model_type
+        self.verbose = verbose
 
     def fit_and_predict(
         self, 
         raw_data: pd.DataFrame, 
         train_portion: float = 0.8,
-        print_details: bool = False,
-    ) -> "RegressionModel":
+    ) -> "TimeSeriesModel":
         """
         Split series into train and test parts, fit model to the train data,
         and forecast for the test part. The split is done so that the training
-        data is the first part of the series and the test data is the last part.
-
-        If `print_details` is True, print progress messages (such as cross val 
-        scores) during the process. This controls the verbosity of the output.
-        
-        TODO: This is just a placeholder to prototype the functionality.
+        data is the first portion of the series and the test data is the last part.
         """
         self.raw_data = raw_data
         train, test, scaler = preprocess_and_split(self.raw_data, train_portion, self.quantity)
         features = train.columns
 
-        # Choose parameters for the VAR model using cross-val scores
-        lag = self.find_best_lag(train, lag_options=[24, 48], print_details=print_details)
+        # Choose the lag (window size) parameter for the model using cross-val scores
+        lag = self.find_best_lag(train, lag_options=[12, 24, 48])
 
-        # Fit model on the full training set
-        model = VAR(maxlags=lag, ic='aic')
-        model_fitted = model.fit(train)
+        if self.model_type == ModelType.LGBM:
+            # Split the data into endogenous and exogenous variables
+            train_endo = train.drop(columns=[col for col in features if col != self.quantity])
+            train_exo = train.drop(columns=[self.quantity])
+            test_endo = test.drop(columns=[col for col in features if col != self.quantity])
+            test_exo = test.drop(columns=[self.quantity])
 
-        # Forecast for the test set
-        forecast_test_steps = len(test)
-        forecast_test = model_fitted.predict(fh=np.arange(1, forecast_test_steps))
+            # Fit the LGBM model using windowed data
+            regressor = LGBMRegressor(verbose=-1)
+            forecaster = RecursiveReductionForecaster(regressor, window_length=lag)
+            forecaster = forecaster.fit(y=train_endo, X=train_exo)
+            # Forecast for the test set
+            forecast_horizon = np.arange(1, len(test_endo) + 1)
+            forecast_test = forecaster.predict(fh=forecast_horizon, X=test_exo)
+        else:
+            # Fit the VAR model on the training data
+            forecaster = VAR(maxlags=lag, ic='aic')
+            forecaster = forecaster.fit(train)
+            # Forecast for the test set
+            forecast_horizon = np.arange(1, len(test) + 1)
+            forecast_test = forecaster.predict(fh=forecast_horizon)
         forecast_test = pd.DataFrame(forecast_test, index=test.index, columns=features)
 
-        # Save the data for later use
-        self.train = train
-        self.test = test
-        self.scaler = scaler
-        self.forecast_test = forecast_test
+        # Re-scale the data to the original scale and save for future use
+        self.train = inverse_scale(scaler, train)
+        self.test = inverse_scale(scaler, test)
+        self.forecast_test = inverse_scale(scaler, forecast_test)
         return self
     
-    def find_best_lag(
-        self, 
-        data: pd.DataFrame, 
-        lag_options: list[int], 
-        print_details: bool = False
-    ) -> VAR:
-        """Choose one of the specified lag options by cross-validation scores.
-
-        Return the VAR model with the best lag option, to be fitted on the whole
-        training set.
-        """
+    def find_best_lag(self, data: pd.DataFrame, lag_options: list[int]) -> int:
+        """Choose one of the specified lag options by cross-validation scores."""
         cv_mae_results = {}
         for lag in lag_options:
-            cv_mae_results[lag] = self.var_cross_val(lag, data, print_details=print_details)
+            cv_mae_results[lag] = self.var_cross_val(lag, data)
 
-        # Choose the lag with the lowest MAE
+        # Choose the lag with the lowest mean MAE
         best_lag = min(cv_mae_results, key=cv_mae_results.get)
-        if print_details:
-            print(f"Best lag value: {best_lag} (with cross-val MAE: {cv_mae_results[best_lag]})\n")
+        if self.verbose:
+            score = cv_mae_results[best_lag]
+            print(f"Best lag value: {best_lag} (with mean cross-val MAE: {score})\n")
         return best_lag
     
-    def var_cross_val(
-        self, 
-        lag: int, 
-        data: pd.DataFrame, 
-        print_details: bool = False,
-    ) -> VAR:
-        """Run cross-val with the VAR model with specified lag.
-         
-        Returns the mean MAE score.
-        """
-        model = VAR(maxlags=lag, ic='aic')
+    def var_cross_val(self, lag: int, data: pd.DataFrame) -> float:
+        """Run cross-val with the model and specified lag and compute mean MAE 
+        score across the splits."""
         # Start with a 10-day initial window, move by 1 day, forecast 1 day ahead
         cv = ExpandingWindowSplitter(initial_window=480, step_length=48, fh=np.arange(1, 48))
         loss = MeanAbsoluteError()
-        results = evaluate(forecaster=model, y=data, cv=cv, scoring=loss)
-        if print_details:
+
+        if self.model_type == ModelType.LGBM:
+            regressor = LGBMRegressor(verbose=-1)
+            forecaster = RecursiveReductionForecaster(regressor, window_length=12) # TODO
+            data_endo = data.drop(columns=[col for col in data.columns if col != self.quantity])
+            data_exo = data.drop(columns=[self.quantity])
+            results = evaluate(forecaster, y=data_endo, X=data_exo, cv=cv, scoring=loss)
+        else:
+            forecaster = VAR(maxlags=lag, ic='aic')
+            results = evaluate(forecaster, y=data, cv=cv, scoring=loss)
+
+        if self.verbose:
             print(f"Cross-validation results for lag {lag}:\n{results}\n")
         return results['test_MeanAbsoluteError'].mean()
     
-    def plot(self, show_train: bool = False, output_path: Optional[str] = None):
-        """Plot the results of the model.
+    def evaluate_and_plot(self, show_train: bool = False, output_path=None):
+        """Evaluate the forecasting using MAPE score and plot the series.
         
+        Mean absolute percentage error (MAPE) is used as the evaluation metric,
+        since it is an intuitive measure of the forecast accuracy.
+
         Plots the actual testing time series against the forecasted values.
         If `show_train` is True, also plots the initial part of the time series
         that was used as the training data.
         """
-        # TODO: Properly plot actual vs predicted values
-
-        # Inverse transform the scaled forecast data to original scale for plotting
-        forecast_test_scaled = pd.DataFrame(
-            self.scaler.inverse_transform(self.forecast_test),
-            index=self.forecast_test.index,
-            columns=self.forecast_test.columns
-        )
-
-        # Prepare the data for plotting
-        plt.figure(figsize=(12, 6))
-        # If show_train is True, plot the training data as well
-        start_idx = 0 if show_train else len(self.train)        
-        plt.plot(self.raw_data.index[start_idx:], self.raw_data[self.quantity][start_idx:], label=f"Actual {self.quantity}", linestyle="dashed")
-        # Plot the forecasted values in different color
-        plt.plot(forecast_test_scaled.index, forecast_test_scaled[self.quantity], label=f"Forecast {self.quantity}")
+        test_y = self.test[self.quantity]
+        forecast_y = self.forecast_test[self.quantity]
+        mape = MeanAbsolutePercentageError()(test_y, forecast_y)        
+        
+        plt.figure(figsize=(10, 5))
         if show_train:
-            # Highligh different periods in the plot
-            plt.axvspan(self.raw_data.index[0], self.raw_data.index[len(self.train)-1], color='lightblue', alpha=0.15, label="Train period")
-            plt.axvspan(self.raw_data.index[len(self.train)], self.raw_data.index[-1], color='orange', alpha=0.1, label="Forecast period")
+            # Plot whole series and highlight different periods in the plot
+            whole_y = self.raw_data[self.quantity]
+            whole_y.plot(label=f"Actual {self.quantity}", linestyle="dashed") 
+            forecast_y.plot(label=f"Forecast {self.quantity}") 
+            start_train, end_train = self.train.index[0], self.train.index[-1]
+            start_test, end_test = self.test.index[0], self.test.index[-1]
+            plt.axvspan(start_train, end_train, color='lightblue', alpha=0.15, label="Train period")
+            plt.axvspan(start_test, end_test, color='orange', alpha=0.1, label="Forecast period")
+        else:
+            # Plot only the test data
+            test_y.plot(label=f"Actual {self.quantity}", linestyle="dashed")
+            forecast_y.plot(label=f"Forecast {self.quantity}") 
         plt.legend()
         plt.title("Normalized VAR model forecast")
 
@@ -183,16 +233,13 @@ class RegressionModel:
             plt.savefig(output_path)
         else:
             plt.show()
-
-    def evaluate(self) -> float:
-        """Evaluate the model using a suitable metric. Print the metric and return it."""
-        # TODO: Choose a suitable metric for the time series and selected model 
-        mae = np.abs(self.forecast_test - self.test).mean()
-        print(f"Normalized MAE for {self.quantity} forecast:", mae[self.quantity])
-        return mae[self.quantity]
+        return mape
 
 
 if __name__ == '__main__':
+    # Initialize the environment
+    os.environ["LOKY_MAX_CPU_COUNT"] = str(2)
+    warnings.filterwarnings("ignore", category=UserWarning)
     sns.set_theme(style="whitegrid")
 
     # Parse command line arguments
@@ -204,6 +251,7 @@ if __name__ == '__main__':
     parser.add_argument('-q', '--quantity', required=True, help='Quantity to model and plot')
     parser.add_argument('-o', '--output', help='Optional path to export the PNG plot')
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose messages')
+    parser.add_argument('-m', '--model', help='Model type (VAR or LGBM)', default='LGBM', choices=['VAR', 'LGBM'])
     args = parser.parse_args()
 
     # Load the data and check that the requested quantity is present
@@ -213,12 +261,11 @@ if __name__ == '__main__':
         exit(1)
 
     # Instatiate the model, do all the processing, and plot the results
-    model = RegressionModel(quantity=args.quantity)
+    model = TimeSeriesModel(args.quantity, ModelType(args.model), args.verbose)
     try:
-        model = model.fit_and_predict(input_data, train_portion=0.8, print_details=args.verbose)
+        model = model.fit_and_predict(input_data, train_portion=0.8)
+        mape_score = model.evaluate_and_plot(show_train=True, output_path=args.output)
+        print(f"Mean absolute percentage error for {args.quantity} forecast:", mape_score)
     except ValueError as e:
         print(f"Error during processing: {e}")
         exit(1)
-
-    model.evaluate()
-    model.plot(show_train=True, output_path=args.output)

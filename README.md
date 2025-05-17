@@ -15,7 +15,7 @@ pip install -r requirements.txt
 
 Use `time_series.py` to run the whole process. The usage is following: 
 ```
-time_series.py [-h] -i INPUT -q QUANTITY [-o OUTPUT] -v
+time_series.py [-h] -i INPUT -q QUANTITY [-o OUTPUT] [-v] [-m {VAR,LGBM}]
 ```
 
 If the output path is given, plot is exported as PNG. Otherwise, it is only opened in a console. The evaluation metric details are printed at the end. Use `python .\time_series.py -h` for further details.
@@ -30,7 +30,7 @@ Additionaly, some initial data exploration and visualization is provided in `exp
 
 ### Tests
 
-Simple tests are provided in `unit-test.py`. Run them with:
+Simple tests are provided in `unit_test.py`. Run them with:
 ```
-python -m unittest .\unit-test.py -v
+python -m unittest .\unit_test.py -v
 ```

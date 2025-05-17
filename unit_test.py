@@ -1,12 +1,14 @@
 import unittest
 import pandas as pd
-from regression import RegressionModel, load_data, preprocess_and_split
+from time_series import ModelType, TimeSeriesModel, load_data, drop_constant_cols
 
 
 class TestModel(unittest.TestCase):
     def test_init(self):
-        model = RegressionModel("Consumption")
+        model = TimeSeriesModel("Consumption", ModelType.LGBM)
         self.assertEqual(model.quantity, 'Consumption')
+        self.assertEqual(model.model_type, ModelType.LGBM)
+        self.assertEqual(model.verbose, False)
 
 
 class TestDataProcessing(unittest.TestCase):
@@ -21,12 +23,10 @@ class TestDataProcessing(unittest.TestCase):
             "Constant_column": [1, 1, 1],
             "Non_constant_column": [20, 21, 19]
         })
-        data["Time"] = pd.to_datetime(data["Time"], format='ISO8601', utc=True)
-        data.set_index("Time", inplace=True)
 
         # check that the constant column is removed
-        train, _, _ = preprocess_and_split(data, 0.5, "Non_constant_column")
-        self.assertNotIn("Consumption", train.columns)
+        data = drop_constant_cols(data, "Non_constant_column")
+        self.assertNotIn("Consumption", data.columns)
 
 
 if __name__ == '__main__':

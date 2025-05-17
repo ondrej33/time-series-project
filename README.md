@@ -1,4 +1,4 @@
-## Simple time-series regression model
+## Simple time-series model
 
 > In progress
 
@@ -13,16 +13,16 @@ pip install -r requirements.txt
 
 ### Usage
 
-Use `regression.py` to run the whole process. The usage is following: 
+Use `time_series.py` to run the whole process. The usage is following: 
 ```
-regression.py [-h] -i INPUT -q QUANTITY [-o OUTPUT] -v
+time_series.py [-h] -i INPUT -q QUANTITY [-o OUTPUT] -v
 ```
 
-If the output path is given, plot is exported as PNG. Otherwise, it is only opened in a console. The evaluation metric details are printed at the end. Use `python .\regression.py -h` for further details.
+If the output path is given, plot is exported as PNG. Otherwise, it is only opened in a console. The evaluation metric details are printed at the end. Use `python .\time_series.py -h` for further details.
 
 You can run the whole program with the example data as:
 ```
-python .\regression.py -i .\data.csv -q "Consumption" -o "consumption-forecast.png"
+python .\time_series.py -i .\data.csv -q "Consumption" -o "consumption-forecast.png"
 ```
 
 Additionaly, some initial data exploration and visualization is provided in `explore.ipynb`.

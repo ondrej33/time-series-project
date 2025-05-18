@@ -97,6 +97,14 @@ def preprocess_and_split(
     return train_scaled, test_scaled, scaler
 
 
+def lineplot_series(data: pd.DataFrame, quantity: str, forecast=False):
+    """Wrapper to lineplot the time series data, not setting any params."""
+    if forecast:
+        sns.lineplot(x='Time', y=quantity, data=data, label=f"Forecast {quantity}") 
+    else:
+        sns.lineplot(x='Time', y=quantity, data=data, label=f"Actual {quantity}", linestyle="dashed") 
+
+
 class TimeSeriesModel:
     """A wrapper for a time-series model. Models can be VAR or LGBM.
 
@@ -132,7 +140,7 @@ class TimeSeriesModel:
         features = train.columns
 
         # Choose the lag (window size) parameter for the model using cross-val scores
-        lag = self.find_best_lag(train, lag_options=[12, 24, 48])
+        lag = 24
 
         if self.model_type == ModelType.LGBM:
             # Split the data into endogenous and exogenous variables
@@ -167,7 +175,7 @@ class TimeSeriesModel:
         """Choose one of the specified lag options by cross-validation scores."""
         cv_mae_results = {}
         for lag in lag_options:
-            cv_mae_results[lag] = self.var_cross_val(lag, data)
+            cv_mae_results[lag] = self.run_cross_val(lag, data)
 
         # Choose the lag with the lowest mean MAE
         best_lag = min(cv_mae_results, key=cv_mae_results.get)
@@ -176,7 +184,7 @@ class TimeSeriesModel:
             print(f"Best lag value: {best_lag} (with mean cross-val MAE: {score})\n")
         return best_lag
     
-    def var_cross_val(self, lag: int, data: pd.DataFrame) -> float:
+    def run_cross_val(self, lag: int, data: pd.DataFrame) -> float:
         """Run cross-val with the model and specified lag and compute mean MAE 
         score across the splits."""
         # Start with a 10-day initial window, move by 1 day, forecast 1 day ahead
@@ -211,22 +219,23 @@ class TimeSeriesModel:
         forecast_y = self.forecast_test[self.quantity]
         mape = MeanAbsolutePercentageError()(test_y, forecast_y)        
         
-        plt.figure(figsize=(10, 5))
+        plt.figure(figsize=(11, 6))
         if show_train:
             # Plot whole series and highlight different periods in the plot
-            whole_y = self.raw_data[self.quantity]
-            whole_y.plot(label=f"Actual {self.quantity}", linestyle="dashed") 
-            forecast_y.plot(label=f"Forecast {self.quantity}") 
+            lineplot_series(self.raw_data, self.quantity, forecast=False)
+            lineplot_series(self.forecast_test, self.quantity, forecast=True)
             start_train, end_train = self.train.index[0], self.train.index[-1]
             start_test, end_test = self.test.index[0], self.test.index[-1]
-            plt.axvspan(start_train, end_train, color='lightblue', alpha=0.15, label="Train period")
-            plt.axvspan(start_test, end_test, color='orange', alpha=0.1, label="Forecast period")
+            plt.axvspan(start_train, end_train, color='lightblue', alpha=0.2, label="Train period")
+            plt.axvspan(start_test, end_test, color='orange', alpha=0.15, label="Forecast period")
         else:
             # Plot only the test data
-            test_y.plot(label=f"Actual {self.quantity}", linestyle="dashed")
-            forecast_y.plot(label=f"Forecast {self.quantity}") 
+            lineplot_series(self.test, self.quantity, forecast=False)
+            lineplot_series(self.forecast_test, self.quantity, forecast=True)
+        plt.xticks(rotation=45)
+        plt.tight_layout(pad=2.0)
         plt.legend()
-        plt.title("Normalized VAR model forecast")
+        plt.title(f"{self.model_type.value} model forecast")
 
         # Either save into file or just show the plot
         if output_path is not None:
@@ -237,15 +246,15 @@ class TimeSeriesModel:
 
 
 if __name__ == '__main__':
-    # Initialize the environment
+    # Initialize the environment (set values to avoid warnings)
     os.environ["LOKY_MAX_CPU_COUNT"] = str(2)
     warnings.filterwarnings("ignore", category=UserWarning)
     sns.set_theme(style="whitegrid")
 
     # Parse command line arguments
     parser = ArgumentParser(
-        prog='regression.py',
-        description='Loads csv data, fits a regression model, returns a plot and a precision metric.'
+        prog='time_series.py',
+        description='Loads csv data, fits a forecaster, returns a plot and a precision metric.'
     )
     parser.add_argument('-i', '--input', required=True, help='Path to the input CSV file')
     parser.add_argument('-q', '--quantity', required=True, help='Quantity to model and plot')
@@ -263,7 +272,7 @@ if __name__ == '__main__':
     # Instatiate the model, do all the processing, and plot the results
     model = TimeSeriesModel(args.quantity, ModelType(args.model), args.verbose)
     try:
-        model = model.fit_and_predict(input_data, train_portion=0.8)
+        model = model.fit_and_predict(input_data, train_portion=0.75)
         mape_score = model.evaluate_and_plot(show_train=True, output_path=args.output)
         print(f"Mean absolute percentage error for {args.quantity} forecast:", mape_score)
     except ValueError as e:

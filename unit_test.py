@@ -15,7 +15,7 @@ class TestModel(unittest.TestCase):
 class TestDataProcessing(unittest.TestCase):
     def test_load(self):
         # Placeholder test to check data is loaded as expected.
-        data = load_data("simple_test_data.csv")
+        data = load_data("data/simple_test_data.csv")
         self.assertEqual(len(data), 3)
 
     def test_preproc_constant_column(self):

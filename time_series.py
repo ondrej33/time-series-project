@@ -12,7 +12,7 @@ from sklearn.preprocessing import MinMaxScaler
 from sktime.forecasting.compose import RecursiveReductionForecaster
 from sktime.forecasting.model_evaluation import evaluate
 from sktime.forecasting.var import VAR
-from sktime.performance_metrics.forecasting import MeanAbsoluteError, MeanAbsolutePercentageError
+from sktime.performance_metrics.forecasting import MeanAbsoluteError
 from sktime.split import ExpandingWindowSplitter
 
 
@@ -119,6 +119,7 @@ class TimeSeriesModel:
         quantity: Name of the target quantity to be predicted
         model_type: Type of model to be used (VAR or LGBM)
         verbose: If True, print additional information during processing
+    Later, raw_data, train, test, and forecast_test attributes are set once processed.
     """
     def __init__(self, quantity: str, model_type: ModelType, verbose: bool = False):
         self.quantity = quantity
@@ -140,7 +141,7 @@ class TimeSeriesModel:
         features = train.columns
 
         # Choose the lag (window size) parameter for the model using cross-val scores
-        lag = 24
+        lag = self.find_best_lag(train, lag_options=[12, 24, 48])
 
         if self.model_type == ModelType.LGBM:
             # Split the data into endogenous and exogenous variables
@@ -165,10 +166,10 @@ class TimeSeriesModel:
             forecast_test = forecaster.predict(fh=forecast_horizon)
         forecast_test = pd.DataFrame(forecast_test, index=test.index, columns=features)
 
-        # Re-scale the data to the original scale and save for future use
-        self.train = inverse_scale(scaler, train)
-        self.test = inverse_scale(scaler, test)
-        self.forecast_test = inverse_scale(scaler, forecast_test)
+        self.train = train
+        self.test = test
+        self.forecast_test = forecast_test
+        self.scaler = scaler
         return self
     
     def find_best_lag(self, data: pd.DataFrame, lag_options: list[int]) -> int:
@@ -205,19 +206,24 @@ class TimeSeriesModel:
             print(f"Cross-validation results for lag {lag}:\n{results}\n")
         return results['test_MeanAbsoluteError'].mean()
     
-    def evaluate_and_plot(self, show_train: bool = False, output_path=None):
-        """Evaluate the forecasting using MAPE score and plot the series.
+    def evaluate_and_plot(self, show_train=False, output_path=None) -> tuple[float, float]:
+        """Evaluate the forecasting using MAE score and plot the series.
         
-        Mean absolute percentage error (MAPE) is used as the evaluation metric,
-        since it is an intuitive measure of the forecast accuracy.
+        Mean absolute error (MAE) is used, since it is an intuitive measure. 
+        The MAE is computed on both the normalized values (to be comparable 
+        across different quantities), as well as at the original scale.
 
         Plots the actual testing time series against the forecasted values.
         If `show_train` is True, also plots the initial part of the time series
         that was used as the training data.
         """
-        test_y = self.test[self.quantity]
-        forecast_y = self.forecast_test[self.quantity]
-        mape = MeanAbsolutePercentageError()(test_y, forecast_y)        
+        mae_instance = MeanAbsoluteError() 
+        mae_norm = mae_instance(self.test[self.quantity], self.forecast_test[self.quantity])  
+
+        # Inverse scale the zero-one normalized values to get the original scale
+        self.forecast_test = inverse_scale(self.scaler, self.forecast_test)
+        self.test = inverse_scale(self.scaler, self.test)
+        mae_orig = mae_instance(self.test[self.quantity], self.forecast_test[self.quantity])
         
         plt.figure(figsize=(11, 6))
         if show_train:
@@ -242,7 +248,7 @@ class TimeSeriesModel:
             plt.savefig(output_path)
         else:
             plt.show()
-        return mape
+        return mae_norm, mae_orig
 
 
 if __name__ == '__main__':
@@ -272,9 +278,10 @@ if __name__ == '__main__':
     # Instatiate the model, do all the processing, and plot the results
     model = TimeSeriesModel(args.quantity, ModelType(args.model), args.verbose)
     try:
-        model = model.fit_and_predict(input_data, train_portion=0.75)
-        mape_score = model.evaluate_and_plot(show_train=True, output_path=args.output)
-        print(f"Mean absolute percentage error for {args.quantity} forecast:", mape_score)
+        model = model.fit_and_predict(input_data, train_portion=0.8)
+        mae_norm, mae_orig = model.evaluate_and_plot(show_train=True, output_path=args.output)
+        print(f"MAE for normalized '{args.quantity}' forecast:", mae_norm)
+        print(f"MAE for '{args.quantity}' forecast:", mae_orig)
     except ValueError as e:
-        print(f"Error during processing: {e}")
+        print(f"Processing finished with an issue: {e}")
         exit(1)

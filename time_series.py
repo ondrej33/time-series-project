@@ -17,19 +17,20 @@ from sktime.split import ExpandingWindowSplitter
 
 
 class ModelType(Enum):
+    """Enum for type-safe model type."""
     VAR = "VAR"
     LGBM = "LGBM"
 
 
 def load_data(data_path: str) -> pd.DataFrame:
-    """Load the data from a CSV file, parse the time column, and set it as the index."""
+    """Load the data from a CSV file, set parsed time column as index."""
     data = pd.read_csv(data_path, sep=";", parse_dates=["Time"], index_col="Time")
     data.index = pd.to_datetime(data.index, format='ISO8601', utc=True)
     return data
 
 
 def scale(scaler: MinMaxScaler, data: pd.DataFrame) -> pd.DataFrame:
-    """Wrapper to transform data with a fitted scaler, returning proper pd.DataFrame."""
+    """Wrapper to transform data with a fitted scaler, returning pd.DataFrame."""
     data_scaled_raw = scaler.transform(data)
     data_scaled = pd.DataFrame(
         data_scaled_raw, 
@@ -40,7 +41,7 @@ def scale(scaler: MinMaxScaler, data: pd.DataFrame) -> pd.DataFrame:
 
 
 def inverse_scale(scaler: MinMaxScaler, data: pd.DataFrame) -> pd.DataFrame:
-    """Wrapper to inverse transform data with a fitted scaler, returning pd.DataFrame."""
+    """Wrapper to inverse data with a fitted scaler, returning pd.DataFrame."""
     data_inverse_scaled_raw = scaler.inverse_transform(data)
     data_inverse_scaled = pd.DataFrame(
         data_inverse_scaled_raw,
@@ -58,12 +59,22 @@ def drop_constant_cols(data: pd.DataFrame, target_quantity: str) -> pd.DataFrame
     constant_cols = [col for col in data.columns if data[col].nunique() <= 1]
     if constant_cols:
         # If the target quantity is constant, raise an error and inform the user
-        # that the model would not ma
+        # that the model would not make sense
         if target_quantity is not None and target_quantity in constant_cols:
             val = data[target_quantity].unique()[0]
             raise ValueError(f"'{target_quantity}' is constant ({val}) and doesn't need regression.")
         data = data.drop(columns=constant_cols)
     return data
+
+
+def get_endo_exo(data: pd.DataFrame, quantity: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split the data into endogenous and exogenous series.
+    
+    The endogenous series is just the quantity, while the exogenous series is the rest.
+    """
+    endo = data.drop(columns=[col for col in data.columns if col != quantity])
+    exo = data.drop(columns=[quantity])
+    return endo, exo
 
 
 def preprocess_and_split(
@@ -98,18 +109,20 @@ def preprocess_and_split(
 
 
 def lineplot_series(data: pd.DataFrame, quantity: str, forecast=False):
-    """Wrapper to lineplot the time series data, not setting any params."""
+    """Wrapper to lineplot the time series data, not setting any plot params."""
     if forecast:
-        sns.lineplot(x='Time', y=quantity, data=data, label=f"Forecast {quantity}") 
+        label = f"Forecast {quantity}"
+        sns.lineplot(x='Time', y=quantity, data=data, label=label) 
     else:
-        sns.lineplot(x='Time', y=quantity, data=data, label=f"Actual {quantity}", linestyle="dashed") 
+        label = f"Actual {quantity}"
+        sns.lineplot(x='Time', y=quantity, data=data, label=label, linestyle="dashed") 
 
 
 class TimeSeriesModel:
-    """A wrapper for a time-series model. Models can be VAR or LGBM.
+    """A wrapper for a time-series model. Model can be either VAR or LGBM.
 
     VAR is a vector autoregression model, very simple statistical model
-    that forecasts vector of all quantities as output based on past values.
+    that forecasts vector of all quantities as output based on purely past values.
 
     LGBM is a gradient boosting model that is adapted for forecasting using a
     rolling window approach. We use it to predict the target quantity value using 
@@ -119,7 +132,7 @@ class TimeSeriesModel:
         quantity: Name of the target quantity to be predicted
         model_type: Type of model to be used (VAR or LGBM)
         verbose: If True, print additional information during processing
-    Later, raw_data, train, test, and forecast_test attributes are set once processed.
+    Later, raw_data, train, test, and forecast_test attributes are set.
     """
     def __init__(self, quantity: str, model_type: ModelType, verbose: bool = False):
         self.quantity = quantity
@@ -135,6 +148,8 @@ class TimeSeriesModel:
         Split series into train and test parts, fit model to the train data,
         and forecast for the test part. The split is done so that the training
         data is the first portion of the series and the test data is the last part.
+
+        All the datasets are saved as attributes of this instance for later use.
         """
         self.raw_data = raw_data
         train, test, scaler = preprocess_and_split(self.raw_data, train_portion, self.quantity)
@@ -145,10 +160,8 @@ class TimeSeriesModel:
 
         if self.model_type == ModelType.LGBM:
             # Split the data into endogenous and exogenous variables
-            train_endo = train.drop(columns=[col for col in features if col != self.quantity])
-            train_exo = train.drop(columns=[self.quantity])
-            test_endo = test.drop(columns=[col for col in features if col != self.quantity])
-            test_exo = test.drop(columns=[self.quantity])
+            train_endo, train_exo = get_endo_exo(train, self.quantity)
+            test_endo, test_exo = get_endo_exo(test, self.quantity)
 
             # Fit the LGBM model using windowed data
             regressor = LGBMRegressor(verbose=-1)
@@ -195,8 +208,7 @@ class TimeSeriesModel:
         if self.model_type == ModelType.LGBM:
             regressor = LGBMRegressor(verbose=-1)
             forecaster = RecursiveReductionForecaster(regressor, window_length=12) # TODO
-            data_endo = data.drop(columns=[col for col in data.columns if col != self.quantity])
-            data_exo = data.drop(columns=[self.quantity])
+            data_endo, data_exo = get_endo_exo(data, self.quantity)
             results = evaluate(forecaster, y=data_endo, X=data_exo, cv=cv, scoring=loss)
         else:
             forecaster = VAR(maxlags=lag, ic='aic')

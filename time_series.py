@@ -156,7 +156,9 @@ class TimeSeriesModel:
         features = train.columns
 
         # Choose the lag (window size) parameter for the model using cross-val scores
-        lag = self.find_best_lag(train, lag_options=[12, 24, 48])
+        # VAR model requires larger lag than LGBM 
+        lag_options = [6, 12, 24] if self.model_type == ModelType.LGBM else [12, 24, 48]
+        lag = self.find_best_lag(train, lag_options=lag_options)
 
         if self.model_type == ModelType.LGBM:
             # Split the data into endogenous and exogenous variables
@@ -207,7 +209,7 @@ class TimeSeriesModel:
 
         if self.model_type == ModelType.LGBM:
             regressor = LGBMRegressor(verbose=-1)
-            forecaster = RecursiveReductionForecaster(regressor, window_length=12) # TODO
+            forecaster = RecursiveReductionForecaster(regressor, window_length=lag)
             data_endo, data_exo = get_endo_exo(data, self.quantity)
             results = evaluate(forecaster, y=data_endo, X=data_exo, cv=cv, scoring=loss)
         else:
